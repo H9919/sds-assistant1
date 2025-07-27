@@ -1,4 +1,4 @@
-# Complete SDS Assistant with AI Question Answering
+# Complete SDS Assistant with Cloud Storage and Fixed Buttons
 import os
 from flask import Flask, render_template_string, request, jsonify, send_file, session
 import sqlite3
@@ -12,73 +12,179 @@ from werkzeug.utils import secure_filename
 import requests
 import re
 import json
+import boto3
+from botocore.exceptions import ClientError
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'sds-assistant-secret-key-2024')
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
+# AWS S3 Configuration
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'sds-documents-bucket')
+
 # Create necessary directories
 for folder in ['static/uploads', 'static/stickers', 'static/exports', 'data']:
     Path(folder).mkdir(parents=True, exist_ok=True)
 
-# US Cities Data
+# US Cities Data (simplified for space)
 US_CITIES_DATA = {
-    "Alabama": ["Birmingham", "Montgomery", "Mobile", "Huntsville", "Tuscaloosa"],
-    "Alaska": ["Anchorage", "Fairbanks", "Juneau", "Wasilla", "Sitka"],
-    "Arizona": ["Phoenix", "Tucson", "Mesa", "Chandler", "Scottsdale"],
-    "Arkansas": ["Little Rock", "Fort Smith", "Fayetteville", "Springdale"],
-    "California": ["Los Angeles", "San Diego", "San Jose", "San Francisco", "Fresno", "Sacramento"],
-    "Colorado": ["Denver", "Colorado Springs", "Aurora", "Fort Collins"],
-    "Connecticut": ["Bridgeport", "New Haven", "Hartford", "Stamford"],
-    "Delaware": ["Wilmington", "Dover", "Newark", "Middletown"],
-    "Florida": ["Jacksonville", "Miami", "Tampa", "Orlando", "St. Petersburg"],
-    "Georgia": ["Atlanta", "Augusta", "Columbus", "Savannah", "Athens"],
-    "Hawaii": ["Honolulu", "Pearl City", "Hilo", "Kailua"],
-    "Idaho": ["Boise", "Meridian", "Nampa", "Idaho Falls"],
-    "Illinois": ["Chicago", "Aurora", "Rockford", "Joliet", "Naperville"],
-    "Indiana": ["Indianapolis", "Fort Wayne", "Evansville", "South Bend"],
-    "Iowa": ["Des Moines", "Cedar Rapids", "Davenport", "Sioux City"],
-    "Kansas": ["Wichita", "Overland Park", "Kansas City", "Olathe"],
-    "Kentucky": ["Louisville", "Lexington", "Bowling Green", "Owensboro"],
-    "Louisiana": ["New Orleans", "Baton Rouge", "Shreveport", "Lafayette"],
-    "Maine": ["Portland", "Lewiston", "Bangor", "South Portland"],
-    "Maryland": ["Baltimore", "Frederick", "Rockville", "Gaithersburg"],
-    "Massachusetts": ["Boston", "Worcester", "Springfield", "Lowell"],
-    "Michigan": ["Detroit", "Grand Rapids", "Warren", "Sterling Heights"],
-    "Minnesota": ["Minneapolis", "St. Paul", "Rochester", "Duluth"],
-    "Mississippi": ["Jackson", "Gulfport", "Southaven", "Hattiesburg"],
-    "Missouri": ["Kansas City", "St. Louis", "Springfield", "Independence"],
-    "Montana": ["Billings", "Missoula", "Great Falls", "Bozeman"],
-    "Nebraska": ["Omaha", "Lincoln", "Bellevue", "Grand Island"],
-    "Nevada": ["Las Vegas", "Henderson", "Reno", "North Las Vegas"],
-    "New Hampshire": ["Manchester", "Nashua", "Concord", "Derry"],
-    "New Jersey": ["Newark", "Jersey City", "Paterson", "Elizabeth"],
-    "New Mexico": ["Albuquerque", "Las Cruces", "Rio Rancho", "Santa Fe"],
-    "New York": ["New York City", "Buffalo", "Rochester", "Yonkers"],
-    "North Carolina": ["Charlotte", "Raleigh", "Greensboro", "Durham"],
-    "North Dakota": ["Fargo", "Bismarck", "Grand Forks", "Minot"],
-    "Ohio": ["Columbus", "Cleveland", "Cincinnati", "Toledo"],
-    "Oklahoma": ["Oklahoma City", "Tulsa", "Norman", "Broken Arrow"],
-    "Oregon": ["Portland", "Eugene", "Salem", "Gresham"],
-    "Pennsylvania": ["Philadelphia", "Pittsburgh", "Allentown", "Erie"],
-    "Rhode Island": ["Providence", "Warwick", "Cranston", "Pawtucket"],
+    "Alabama": ["Birmingham", "Montgomery", "Mobile", "Huntsville"],
+    "Alaska": ["Anchorage", "Fairbanks", "Juneau", "Wasilla"],
+    "Arizona": ["Phoenix", "Tucson", "Mesa", "Chandler"],
+    "Arkansas": ["Little Rock", "Fort Smith", "Fayetteville"],
+    "California": ["Los Angeles", "San Diego", "San Jose", "San Francisco"],
+    "Colorado": ["Denver", "Colorado Springs", "Aurora"],
+    "Connecticut": ["Bridgeport", "New Haven", "Hartford"],
+    "Delaware": ["Wilmington", "Dover", "Newark"],
+    "Florida": ["Jacksonville", "Miami", "Tampa", "Orlando"],
+    "Georgia": ["Atlanta", "Augusta", "Columbus", "Savannah"],
+    "Illinois": ["Chicago", "Aurora", "Rockford", "Joliet"],
+    "Indiana": ["Indianapolis", "Fort Wayne", "Evansville"],
+    "Iowa": ["Des Moines", "Cedar Rapids", "Davenport"],
+    "Kansas": ["Wichita", "Overland Park", "Kansas City"],
+    "Kentucky": ["Louisville", "Lexington", "Bowling Green"],
+    "Louisiana": ["New Orleans", "Baton Rouge", "Shreveport"],
+    "Maine": ["Portland", "Lewiston", "Bangor"],
+    "Maryland": ["Baltimore", "Frederick", "Rockville"],
+    "Massachusetts": ["Boston", "Worcester", "Springfield"],
+    "Michigan": ["Detroit", "Grand Rapids", "Warren"],
+    "Minnesota": ["Minneapolis", "St. Paul", "Rochester"],
+    "Mississippi": ["Jackson", "Gulfport", "Southaven"],
+    "Missouri": ["Kansas City", "St. Louis", "Springfield"],
+    "Montana": ["Billings", "Missoula", "Great Falls"],
+    "Nebraska": ["Omaha", "Lincoln", "Bellevue"],
+    "Nevada": ["Las Vegas", "Henderson", "Reno"],
+    "New Hampshire": ["Manchester", "Nashua", "Concord"],
+    "New Jersey": ["Newark", "Jersey City", "Paterson"],
+    "New Mexico": ["Albuquerque", "Las Cruces", "Rio Rancho"],
+    "New York": ["New York City", "Buffalo", "Rochester"],
+    "North Carolina": ["Charlotte", "Raleigh", "Greensboro"],
+    "North Dakota": ["Fargo", "Bismarck", "Grand Forks"],
+    "Ohio": ["Columbus", "Cleveland", "Cincinnati"],
+    "Oklahoma": ["Oklahoma City", "Tulsa", "Norman"],
+    "Oregon": ["Portland", "Eugene", "Salem"],
+    "Pennsylvania": ["Philadelphia", "Pittsburgh", "Allentown"],
+    "Rhode Island": ["Providence", "Warwick", "Cranston"],
     "South Carolina": ["Charleston", "Columbia", "North Charleston"],
     "South Dakota": ["Sioux Falls", "Rapid City", "Aberdeen"],
-    "Tennessee": ["Nashville", "Memphis", "Knoxville", "Chattanooga"],
-    "Texas": ["Houston", "San Antonio", "Dallas", "Austin", "Fort Worth"],
-    "Utah": ["Salt Lake City", "West Valley City", "Provo", "West Jordan"],
+    "Tennessee": ["Nashville", "Memphis", "Knoxville"],
+    "Texas": ["Houston", "San Antonio", "Dallas", "Austin"],
+    "Utah": ["Salt Lake City", "West Valley City", "Provo"],
     "Vermont": ["Burlington", "Essex", "South Burlington"],
-    "Virginia": ["Virginia Beach", "Norfolk", "Chesapeake", "Richmond"],
-    "Washington": ["Seattle", "Spokane", "Tacoma", "Vancouver"],
+    "Virginia": ["Virginia Beach", "Norfolk", "Chesapeake"],
+    "Washington": ["Seattle", "Spokane", "Tacoma"],
     "West Virginia": ["Charleston", "Huntington", "Morgantown"],
-    "Wisconsin": ["Milwaukee", "Madison", "Green Bay", "Kenosha"],
-    "Wyoming": ["Cheyenne", "Casper", "Laramie", "Gillette"]
+    "Wisconsin": ["Milwaukee", "Madison", "Green Bay"],
+    "Wyoming": ["Cheyenne", "Casper", "Laramie"]
 }
+
+class CloudFileStorage:
+    def __init__(self):
+        self.s3_client = None
+        self.bucket_name = S3_BUCKET_NAME
+        self.setup_s3()
+    
+    def setup_s3(self):
+        """Initialize S3 client if credentials are available"""
+        if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+            try:
+                self.s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                    region_name=AWS_REGION
+                )
+                # Try to create bucket if it doesn't exist
+                self.create_bucket_if_not_exists()
+            except Exception as e:
+                print(f"S3 setup failed: {e}")
+                self.s3_client = None
+        else:
+            print("AWS credentials not found. Using local storage fallback.")
+    
+    def create_bucket_if_not_exists(self):
+        """Create S3 bucket if it doesn't exist"""
+        try:
+            self.s3_client.head_bucket(Bucket=self.bucket_name)
+        except ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                try:
+                    if AWS_REGION == 'us-east-1':
+                        self.s3_client.create_bucket(Bucket=self.bucket_name)
+                    else:
+                        self.s3_client.create_bucket(
+                            Bucket=self.bucket_name,
+                            CreateBucketConfiguration={'LocationConstraint': AWS_REGION}
+                        )
+                    print(f"Created S3 bucket: {self.bucket_name}")
+                except Exception as create_error:
+                    print(f"Failed to create bucket: {create_error}")
+    
+    def upload_file(self, file_obj, filename, content_type=None):
+        """Upload file to S3 or local storage"""
+        if self.s3_client:
+            return self.upload_to_s3(file_obj, filename, content_type)
+        else:
+            return self.upload_locally(file_obj, filename)
+    
+    def upload_to_s3(self, file_obj, filename, content_type=None):
+        """Upload file to S3"""
+        try:
+            file_obj.seek(0)
+            extra_args = {}
+            if content_type:
+                extra_args['ContentType'] = content_type
+            
+            self.s3_client.upload_fileobj(
+                file_obj,
+                self.bucket_name,
+                filename,
+                ExtraArgs=extra_args
+            )
+            
+            # Return S3 URL
+            return f"https://{self.bucket_name}.s3.{AWS_REGION}.amazonaws.com/{filename}"
+        except Exception as e:
+            print(f"S3 upload failed: {e}")
+            # Fallback to local storage
+            return self.upload_locally(file_obj, filename)
+    
+    def upload_locally(self, file_obj, filename):
+        """Fallback: Upload file locally"""
+        try:
+            file_path = Path(app.config['UPLOAD_FOLDER']) / filename
+            file_obj.seek(0)
+            with open(file_path, 'wb') as f:
+                f.write(file_obj.read())
+            return f"/static/uploads/{filename}"
+        except Exception as e:
+            print(f"Local upload failed: {e}")
+            return None
+    
+    def get_download_url(self, filename):
+        """Get download URL for file"""
+        if self.s3_client:
+            try:
+                url = self.s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': self.bucket_name, 'Key': filename},
+                    ExpiresIn=3600  # 1 hour
+                )
+                return url
+            except Exception as e:
+                print(f"Failed to generate S3 URL: {e}")
+        
+        # Fallback to local URL
+        return f"/static/uploads/{filename}"
 
 class SDSAssistant:
     def __init__(self, db_path: str = "data/sds_database.db"):
         self.db_path = db_path
+        self.cloud_storage = CloudFileStorage()
         self.setup_database()
         self.populate_us_cities()
     
@@ -100,20 +206,20 @@ class SDSAssistant:
             )
         ''')
         
-        # SDS documents table
+        # SDS documents table with cloud storage support
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS sds_documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 filename TEXT NOT NULL,
                 original_filename TEXT,
                 file_hash TEXT UNIQUE,
+                file_url TEXT,
                 product_name TEXT,
                 manufacturer TEXT,
                 cas_number TEXT,
                 full_text TEXT NOT NULL,
                 location_id INTEGER,
                 source_type TEXT DEFAULT 'upload',
-                web_url TEXT,
                 file_size INTEGER,
                 uploaded_by TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -290,19 +396,18 @@ class SDSAssistant:
         text_lower = text.lower()
         
         for keyword in section_keywords:
-            # Look for section headers
             pattern = rf"{keyword}[:\s]*(.*?)(?=section\s+\d+|$)"
             match = re.search(pattern, text_lower, re.DOTALL | re.IGNORECASE)
             if match:
                 section_text = match.group(1).strip()
-                # Limit to reasonable length
                 return section_text[:1000] if len(section_text) > 1000 else section_text
         
         return ""
     
     def upload_file(self, file, location_id: int, uploaded_by: str = "web_user") -> Dict:
-        """Process uploaded file"""
+        """Process uploaded file with cloud storage"""
         try:
+            # Read file content
             file_content = file.read()
             file.seek(0)
             file_hash = hashlib.sha256(file_content).hexdigest()
@@ -317,14 +422,18 @@ class SDSAssistant:
                 conn.close()
                 return {"success": False, "message": f"File already exists (Product: {existing[1]})"}
             
-            # Save file
+            # Generate unique filename
             filename = secure_filename(file.filename)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            saved_filename = f"{timestamp}_{filename}"
-            file_path = Path(app.config['UPLOAD_FOLDER']) / saved_filename
+            unique_filename = f"{timestamp}_{filename}"
             
+            # Upload to cloud storage
             file.seek(0)
-            file.save(file_path)
+            file_url = self.cloud_storage.upload_file(file, unique_filename, file.content_type)
+            
+            if not file_url:
+                conn.close()
+                return {"success": False, "message": "Failed to upload file to storage"}
             
             # Extract text
             file.seek(0)
@@ -334,6 +443,7 @@ class SDSAssistant:
                 text_content = file_content.decode('utf-8', errors='ignore')
             
             if not text_content.strip():
+                conn.close()
                 return {"success": False, "message": "Could not extract text from file"}
             
             # Extract chemical information
@@ -342,12 +452,12 @@ class SDSAssistant:
             # Insert document
             cursor.execute('''
                 INSERT INTO sds_documents (
-                    filename, original_filename, file_hash, product_name, 
+                    filename, original_filename, file_hash, file_url, product_name, 
                     manufacturer, cas_number, full_text,
                     location_id, source_type, file_size, uploaded_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                saved_filename, filename, file_hash,
+                unique_filename, filename, file_hash, file_url,
                 chem_info["product_name"] or "Unknown Product", 
                 chem_info["manufacturer"] or "Unknown Manufacturer",
                 chem_info["cas_number"], text_content,
@@ -378,21 +488,22 @@ class SDSAssistant:
                 "success": True,
                 "message": "File uploaded successfully",
                 "product_name": chem_info["product_name"] or "Unknown Product",
-                "document_id": document_id
+                "document_id": document_id,
+                "file_url": file_url
             }
             
         except Exception as e:
             return {"success": False, "message": f"Error uploading file: {str(e)}"}
     
     def answer_question(self, question: str, location_id: int = None, user_session: str = None) -> Dict:
-        """Answer questions about SDS documents using AI-powered search"""
+        """Answer questions about SDS documents"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             # Search for relevant documents
             search_query = '''
-                SELECT sd.id, sd.product_name, sd.full_text, 
+                SELECT sd.id, sd.product_name, sd.full_text, sd.file_url,
                        ch.first_aid, ch.fire_fighting, ch.handling_storage, ch.exposure_controls,
                        l.department, l.city, l.state
                 FROM sds_documents sd
@@ -415,11 +526,11 @@ class SDSAssistant:
             if not documents:
                 return {
                     "success": False,
-                    "answer": "I couldn't find any relevant SDS documents to answer your question. Please try uploading relevant SDS files first.",
+                    "answer": "I couldn't find any relevant SDS documents to answer your question. Please upload relevant SDS files first.",
                     "sources": []
                 }
             
-            # Generate answer using simple keyword matching and extraction
+            # Generate answer
             answer = self.generate_answer(question, documents)
             
             # Log the Q&A
@@ -449,7 +560,7 @@ class SDSAssistant:
         sources = []
         confidence = 0.0
         
-        # Define question types and their keywords
+        # Define question types and keywords
         question_types = {
             "first_aid": ["first aid", "emergency", "exposure", "eye contact", "skin contact", "inhalation", "ingestion"],
             "fire_fighting": ["fire", "firefighting", "extinguish", "combustible", "flammable"],
@@ -467,7 +578,7 @@ class SDSAssistant:
                 break
         
         for doc in documents:
-            doc_id, product_name, full_text, first_aid, fire_fighting, handling_storage, exposure_controls, dept, city, state = doc
+            doc_id, product_name, full_text, file_url, first_aid, fire_fighting, handling_storage, exposure_controls, dept, city, state = doc
             
             # Select relevant section based on question type
             relevant_text = ""
@@ -488,12 +599,13 @@ class SDSAssistant:
                 sources.append({
                     "product_name": product_name,
                     "location": f"{dept}, {city}, {state}" if dept else "Unknown location",
-                    "document_id": doc_id
+                    "document_id": doc_id,
+                    "file_url": file_url
                 })
                 confidence += 0.3
         
         if answer_parts:
-            final_answer = "\n\n".join(answer_parts[:3])  # Limit to top 3 results
+            final_answer = "\n\n".join(answer_parts[:3])
             confidence = min(confidence, 1.0)
         else:
             final_answer = "I found relevant documents but couldn't extract specific information to answer your question. Please check the documents directly or rephrase your question."
@@ -522,7 +634,6 @@ class SDSAssistant:
                 best_sentence = sentence.strip()
         
         if best_sentence:
-            # Get context around the best sentence
             sentence_index = sentences.index(best_sentence)
             start_index = max(0, sentence_index - 1)
             end_index = min(len(sentences), sentence_index + 2)
@@ -531,19 +642,6 @@ class SDSAssistant:
             return context[:max_length] + "..." if len(context) > max_length else context
         
         return ""
-    
-    def search_web_for_sds(self, chemical_name: str, location_id: int) -> Dict:
-        """Search web for SDS documents (placeholder - would need actual web scraping)"""
-        # This is a placeholder. In a real implementation, you would:
-        # 1. Search for SDS documents online
-        # 2. Download and parse them
-        # 3. Store in database
-        # 4. Return results
-        
-        return {
-            "success": False,
-            "message": "Web search for SDS documents is not implemented yet. Please upload SDS files manually."
-        }
     
     def generate_nfpa_sticker(self, product_name: str) -> Dict:
         """Generate NFPA diamond sticker"""
@@ -681,6 +779,39 @@ class SDSAssistant:
         except Exception as e:
             return {"success": False, "message": f"Error generating GHS sticker: {str(e)}"}
     
+    def get_recent_documents(self, limit: int = 10) -> List[Dict]:
+        """Get recently uploaded documents"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT sd.id, sd.product_name, sd.original_filename, sd.file_url,
+                       sd.created_at, l.department, l.city, l.state
+                FROM sds_documents sd
+                LEFT JOIN locations l ON sd.location_id = l.id
+                ORDER BY sd.created_at DESC
+                LIMIT ?
+            ''', (limit,))
+            
+            results = cursor.fetchall()
+            conn.close()
+            
+            return [
+                {
+                    "id": row[0],
+                    "product_name": row[1],
+                    "filename": row[2],
+                    "file_url": row[3],
+                    "uploaded_at": row[4],
+                    "location": f"{row[5]}, {row[6]}, {row[7]}" if row[5] else "Unknown location"
+                }
+                for row in results
+            ]
+        except Exception as e:
+            print(f"Error getting recent documents: {e}")
+            return []
+    
     def get_locations(self, state_filter=None, search_term=None) -> List[Dict]:
         """Get locations with optional filtering"""
         try:
@@ -777,13 +908,13 @@ class SDSAssistant:
             }
             
         except Exception as e:
-            print(f"Error getting dashboard stats: {str(e)}")
+            print(f"Error getting dashboard stats: {e}")
             return {"total_documents": 0, "active_locations": 0, "recent_questions": 0, "hazardous_materials": 0, "popular_questions": []}
 
 # Initialize the assistant
 sds_assistant = SDSAssistant()
 
-# Enhanced HTML Template
+# Enhanced HTML Template with Fixed JavaScript
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -800,6 +931,7 @@ HTML_TEMPLATE = '''
         .message { margin-bottom: 1rem; }
         .user-message { background: #3b82f6; color: white; }
         .ai-message { background: #f3f4f6; color: #374151; }
+        .loading { opacity: 0.6; }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -810,7 +942,7 @@ HTML_TEMPLATE = '''
                 <div class="flex items-center">
                     <i class="fas fa-flask text-white text-2xl mr-3"></i>
                     <span class="text-white text-xl font-bold">SDS Assistant</span>
-                    <span class="text-white text-sm ml-2 opacity-75">AI-Powered Safety Data Sheet Management</span>
+                    <span class="text-white text-sm ml-2 opacity-75">AI-Powered Safety Management</span>
                 </div>
                 <div class="flex items-center space-x-4">
                     <button id="uploadBtn" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg transition">
@@ -893,11 +1025,11 @@ HTML_TEMPLATE = '''
                     
                     <div id="chatContainer" class="chat-container border rounded-lg p-4 mb-4 bg-gray-50">
                         <div class="message ai-message p-3 rounded-lg">
-                            <p><strong>AI Assistant:</strong> Hello! I can help you find information in your SDS documents. Try asking questions like:</p>
+                            <p><strong>AI Assistant:</strong> Hello! I can help you find information in your SDS documents. Try asking:</p>
                             <ul class="mt-2 ml-4 list-disc text-sm">
                                 <li>"What are the first aid measures for acetone?"</li>
-                                <li>"How should I store bleach?"</li>
-                                <li>"What PPE is needed for handling sulfuric acid?"</li>
+                                <li>"How should I store bleach safely?"</li>
+                                <li>"What PPE is needed for sulfuric acid?"</li>
                             </ul>
                         </div>
                     </div>
@@ -917,16 +1049,16 @@ HTML_TEMPLATE = '''
                     <div class="mt-4">
                         <h4 class="font-semibold text-gray-700 mb-2">Quick Questions:</h4>
                         <div class="flex flex-wrap gap-2">
-                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="What are the first aid measures for this chemical?">
+                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="What are the first aid measures?">
                                 First Aid
                             </button>
-                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="How should this chemical be stored?">
+                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="How should this be stored?">
                                 Storage
                             </button>
-                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="What PPE is required for handling this chemical?">
+                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="What PPE is required?">
                                 PPE Requirements
                             </button>
-                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="What are the fire fighting measures for this chemical?">
+                            <button class="quick-question bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded-full text-sm transition" data-question="What are the fire fighting measures?">
                                 Fire Fighting
                             </button>
                         </div>
@@ -934,7 +1066,7 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
 
-            <!-- File Upload & Management -->
+            <!-- File Upload & Recent Documents -->
             <div class="bg-white rounded-lg shadow">
                 <div class="p-6">
                     <h2 class="text-2xl font-bold text-gray-900 mb-4">
@@ -948,17 +1080,17 @@ HTML_TEMPLATE = '''
                             <p class="text-sm text-gray-600">PDF, TXT, DOC files</p>
                         </button>
                         
-                        <button id="webSearchBtn" class="bg-green-100 hover:bg-green-200 p-4 rounded-lg transition text-center">
-                            <i class="fas fa-search text-green-600 text-2xl mb-2"></i>
-                            <h3 class="font-semibold">Search Web for SDS</h3>
-                            <p class="text-sm text-gray-600">Find SDS online</p>
+                        <button id="refreshDocsBtn" class="bg-green-100 hover:bg-green-200 p-4 rounded-lg transition text-center">
+                            <i class="fas fa-sync text-green-600 text-2xl mb-2"></i>
+                            <h3 class="font-semibold">Refresh Documents</h3>
+                            <p class="text-sm text-gray-600">Update document list</p>
                         </button>
                     </div>
                     
                     <div id="recentDocuments">
                         <h4 class="font-semibold text-gray-700 mb-3">Recent Documents</h4>
                         <div id="documentsList" class="space-y-2">
-                            <p class="text-gray-500 text-center py-4">No documents uploaded yet</p>
+                            <p class="text-gray-500 text-center py-4">Loading documents...</p>
                         </div>
                     </div>
                 </div>
@@ -970,7 +1102,7 @@ HTML_TEMPLATE = '''
             <div class="p-6">
                 <h3 class="text-xl font-bold text-gray-900 mb-4">Popular Questions</h3>
                 <div id="popularQuestions" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <p class="text-gray-500 text-center py-4 col-span-2">No questions asked yet</p>
+                    <p class="text-gray-500 text-center py-4 col-span-2">Loading popular questions...</p>
                 </div>
             </div>
         </div>
@@ -1024,7 +1156,7 @@ HTML_TEMPLATE = '''
                             <button type="button" id="cancelUpload" class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition">
                                 Cancel
                             </button>
-                            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                            <button type="submit" id="submitUpload" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
                                 <i class="fas fa-upload mr-2"></i>Upload
                             </button>
                         </div>
@@ -1088,130 +1220,222 @@ HTML_TEMPLATE = '''
 
     <script>
         // Global variables
-        let currentConversation = [];
+        let isLoading = false;
         
-        // Initialize app
+        // Initialize app when DOM is loaded
         document.addEventListener('DOMContentLoaded', function() {
+            console.log('Initializing SDS Assistant...');
+            setupEventListeners();
             loadDashboardStats();
             loadStates();
             loadLocations();
-            setupEventListeners();
+            loadRecentDocuments();
         });
         
-        // Setup event listeners
+        // Setup all event listeners
         function setupEventListeners() {
+            console.log('Setting up event listeners...');
+            
             // Question answering
-            document.getElementById('askBtn').addEventListener('click', askQuestion);
-            document.getElementById('questionInput').addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') askQuestion();
-            });
+            const askBtn = document.getElementById('askBtn');
+            const questionInput = document.getElementById('questionInput');
+            
+            if (askBtn) {
+                askBtn.addEventListener('click', askQuestion);
+                console.log('Ask button listener added');
+            }
+            
+            if (questionInput) {
+                questionInput.addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter') {
+                        askQuestion();
+                    }
+                });
+                console.log('Question input listener added');
+            }
             
             // Quick questions
             document.querySelectorAll('.quick-question').forEach(btn => {
                 btn.addEventListener('click', function() {
-                    document.getElementById('questionInput').value = this.dataset.question;
-                    askQuestion();
+                    const question = this.dataset.question;
+                    if (questionInput) {
+                        questionInput.value = question;
+                        askQuestion();
+                    }
                 });
             });
+            console.log('Quick question listeners added');
             
-            // File upload
-            document.getElementById('uploadBtn').addEventListener('click', () => showModal('uploadModal'));
-            document.getElementById('uploadDocBtn').addEventListener('click', () => showModal('uploadModal'));
-            document.getElementById('closeUploadModal').addEventListener('click', () => hideModal('uploadModal'));
-            document.getElementById('cancelUpload').addEventListener('click', () => hideModal('uploadModal'));
-            document.getElementById('uploadForm').addEventListener('submit', handleFileUpload);
+            // Upload buttons
+            const uploadBtn = document.getElementById('uploadBtn');
+            const uploadDocBtn = document.getElementById('uploadDocBtn');
             
-            // Sticker generation
-            document.getElementById('generateStickerBtn').addEventListener('click', () => showModal('stickerModal'));
-            document.getElementById('closeStickerModal').addEventListener('click', () => hideModal('stickerModal'));
-            document.getElementById('cancelSticker').addEventListener('click', () => hideModal('stickerModal'));
-            document.getElementById('generateNFPA').addEventListener('click', () => generateSticker('nfpa'));
-            document.getElementById('generateGHS').addEventListener('click', () => generateSticker('ghs'));
+            if (uploadBtn) {
+                uploadBtn.addEventListener('click', () => {
+                    console.log('Upload button clicked');
+                    showModal('uploadModal');
+                });
+            }
             
-            // State/Location handling
-            document.getElementById('uploadStateSelect').addEventListener('change', function() {
-                loadLocationsByState(this.value, 'uploadLocationSelect');
-            });
+            if (uploadDocBtn) {
+                uploadDocBtn.addEventListener('click', () => {
+                    console.log('Upload doc button clicked');
+                    showModal('uploadModal');
+                });
+            }
             
-            // Web search (placeholder)
-            document.getElementById('webSearchBtn').addEventListener('click', function() {
-                showToast('Web search feature coming soon!', 'info');
-            });
+            // Modal close buttons
+            const closeUploadModal = document.getElementById('closeUploadModal');
+            const cancelSticker = document.getElementById('cancelSticker');
+            const generateNFPA = document.getElementById('generateNFPA');
+            const generateGHS = document.getElementById('generateGHS');
+            
+            if (generateStickerBtn) {
+                generateStickerBtn.addEventListener('click', () => {
+                    console.log('Generate sticker button clicked');
+                    showModal('stickerModal');
+                });
+            }
+            
+            if (closeStickerModal) {
+                closeStickerModal.addEventListener('click', () => hideModal('stickerModal'));
+            }
+            
+            if (cancelSticker) {
+                cancelSticker.addEventListener('click', () => hideModal('stickerModal'));
+            }
+            
+            if (generateNFPA) {
+                generateNFPA.addEventListener('click', () => generateSticker('nfpa'));
+            }
+            
+            if (generateGHS) {
+                generateGHS.addEventListener('click', () => generateSticker('ghs'));
+            }
+            
+            // State selection for upload
+            const uploadStateSelect = document.getElementById('uploadStateSelect');
+            if (uploadStateSelect) {
+                uploadStateSelect.addEventListener('change', function() {
+                    loadLocationsByState(this.value, 'uploadLocationSelect');
+                });
+            }
+            
+            // Refresh documents button
+            const refreshDocsBtn = document.getElementById('refreshDocsBtn');
+            if (refreshDocsBtn) {
+                refreshDocsBtn.addEventListener('click', () => {
+                    console.log('Refresh docs clicked');
+                    loadRecentDocuments();
+                    loadDashboardStats();
+                });
+            }
             
             // Toast close
-            document.getElementById('closeToast').addEventListener('click', hideToast);
+            const closeToast = document.getElementById('closeToast');
+            if (closeToast) {
+                closeToast.addEventListener('click', hideToast);
+            }
+            
+            console.log('All event listeners set up successfully');
         }
         
         // Load dashboard statistics
         async function loadDashboardStats() {
+            console.log('Loading dashboard stats...');
             try {
                 const response = await fetch('/api/dashboard-stats');
+                if (!response.ok) throw new Error('Failed to fetch stats');
+                
                 const stats = await response.json();
+                console.log('Dashboard stats loaded:', stats);
                 
-                document.getElementById('totalDocs').textContent = stats.total_documents;
-                document.getElementById('activeLocations').textContent = stats.active_locations;
-                document.getElementById('recentQuestions').textContent = stats.recent_questions;
-                document.getElementById('hazardousMaterials').textContent = stats.hazardous_materials;
+                document.getElementById('totalDocs').textContent = stats.total_documents || 0;
+                document.getElementById('activeLocations').textContent = stats.active_locations || 0;
+                document.getElementById('recentQuestions').textContent = stats.recent_questions || 0;
+                document.getElementById('hazardousMaterials').textContent = stats.hazardous_materials || 0;
                 
-                updatePopularQuestions(stats.popular_questions);
+                updatePopularQuestions(stats.popular_questions || []);
                 
             } catch (error) {
                 console.error('Error loading dashboard stats:', error);
+                showToast('Error loading dashboard stats', 'error');
             }
         }
         
-        // Load states
+        // Load states for dropdowns
         async function loadStates() {
+            console.log('Loading states...');
             try {
                 const response = await fetch('/api/states');
+                if (!response.ok) throw new Error('Failed to fetch states');
+                
                 const states = await response.json();
+                console.log('States loaded:', states.length);
                 
                 const select = document.getElementById('uploadStateSelect');
-                states.forEach(state => {
-                    const option = document.createElement('option');
-                    option.value = state;
-                    option.textContent = state;
-                    select.appendChild(option);
-                });
+                if (select) {
+                    select.innerHTML = '<option value="">Choose a state...</option>';
+                    states.forEach(state => {
+                        const option = document.createElement('option');
+                        option.value = state;
+                        option.textContent = state;
+                        select.appendChild(option);
+                    });
+                }
                 
             } catch (error) {
                 console.error('Error loading states:', error);
+                showToast('Error loading states', 'error');
             }
         }
         
-        // Load locations
+        // Load locations for filtering
         async function loadLocations() {
+            console.log('Loading locations...');
             try {
                 const response = await fetch('/api/locations');
+                if (!response.ok) throw new Error('Failed to fetch locations');
+                
                 const locations = await response.json();
+                console.log('Locations loaded:', locations.length);
                 
                 const select = document.getElementById('locationFilter');
-                locations.slice(0, 50).forEach(location => {
-                    const option = document.createElement('option');
-                    option.value = location.id;
-                    option.textContent = location.display_name;
-                    select.appendChild(option);
-                });
+                if (select) {
+                    select.innerHTML = '<option value="">All Locations</option>';
+                    locations.slice(0, 50).forEach(location => {
+                        const option = document.createElement('option');
+                        option.value = location.id;
+                        option.textContent = location.display_name;
+                        select.appendChild(option);
+                    });
+                }
                 
             } catch (error) {
                 console.error('Error loading locations:', error);
+                showToast('Error loading locations', 'error');
             }
         }
         
         // Load locations by state
         async function loadLocationsByState(state, selectId) {
+            console.log('Loading locations for state:', state);
+            const select = document.getElementById(selectId);
+            if (!select) return;
+            
             if (!state) {
-                document.getElementById(selectId).innerHTML = '<option value="">Choose a location...</option>';
+                select.innerHTML = '<option value="">Choose a location...</option>';
                 return;
             }
             
             try {
                 const response = await fetch(`/api/locations?state=${encodeURIComponent(state)}`);
+                if (!response.ok) throw new Error('Failed to fetch locations');
+                
                 const locations = await response.json();
+                console.log('State locations loaded:', locations.length);
                 
-                const select = document.getElementById(selectId);
                 select.innerHTML = '<option value="">Choose a location...</option>';
-                
                 locations.forEach(location => {
                     const option = document.createElement('option');
                     option.value = location.id;
@@ -1220,26 +1444,87 @@ HTML_TEMPLATE = '''
                 });
                 
             } catch (error) {
-                console.error('Error loading locations:', error);
+                console.error('Error loading state locations:', error);
+                showToast('Error loading locations for state', 'error');
+            }
+        }
+        
+        // Load recent documents
+        async function loadRecentDocuments() {
+            console.log('Loading recent documents...');
+            try {
+                const response = await fetch('/api/recent-documents');
+                if (!response.ok) throw new Error('Failed to fetch documents');
+                
+                const documents = await response.json();
+                console.log('Recent documents loaded:', documents.length);
+                
+                const container = document.getElementById('documentsList');
+                if (!container) return;
+                
+                if (documents.length === 0) {
+                    container.innerHTML = '<p class="text-gray-500 text-center py-4">No documents uploaded yet</p>';
+                    return;
+                }
+                
+                container.innerHTML = '';
+                documents.forEach(doc => {
+                    const div = document.createElement('div');
+                    div.className = 'bg-gray-50 p-3 rounded-lg hover:bg-gray-100 transition';
+                    div.innerHTML = `
+                        <div class="flex justify-between items-start">
+                            <div class="flex-1">
+                                <h4 class="font-medium text-gray-900">${doc.product_name}</h4>
+                                <p class="text-sm text-gray-600">${doc.filename}</p>
+                                <p class="text-xs text-gray-500">${doc.location}</p>
+                            </div>
+                            <div class="flex flex-col space-y-1">
+                                ${doc.file_url ? `<a href="${doc.file_url}" target="_blank" class="text-blue-600 hover:text-blue-800 text-sm"><i class="fas fa-download mr-1"></i>Download</a>` : ''}
+                                <button onclick="askAboutDocument('${doc.product_name}')" class="text-green-600 hover:text-green-800 text-sm"><i class="fas fa-question-circle mr-1"></i>Ask AI</button>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(div);
+                });
+                
+            } catch (error) {
+                console.error('Error loading recent documents:', error);
+                const container = document.getElementById('documentsList');
+                if (container) {
+                    container.innerHTML = '<p class="text-red-500 text-center py-4">Error loading documents</p>';
+                }
             }
         }
         
         // Ask question to AI
         async function askQuestion() {
-            const question = document.getElementById('questionInput').value.trim();
-            const locationId = document.getElementById('locationFilter').value;
+            if (isLoading) return;
+            
+            const questionInput = document.getElementById('questionInput');
+            const locationFilter = document.getElementById('locationFilter');
+            
+            if (!questionInput) {
+                console.error('Question input not found');
+                return;
+            }
+            
+            const question = questionInput.value.trim();
+            const locationId = locationFilter ? locationFilter.value : null;
             
             if (!question) {
                 showToast('Please enter a question', 'warning');
                 return;
             }
             
+            console.log('Asking question:', question);
+            isLoading = true;
+            
             // Add user message to chat
             addMessageToChat(question, 'user');
-            document.getElementById('questionInput').value = '';
+            questionInput.value = '';
             
-            // Show loading
-            const loadingDiv = addMessageToChat('Thinking...', 'ai', true);
+            // Show loading message
+            const loadingDiv = addMessageToChat('🤔 Thinking...', 'ai', true);
             
             try {
                 const response = await fetch('/api/ask-question', {
@@ -1253,33 +1538,53 @@ HTML_TEMPLATE = '''
                     })
                 });
                 
+                if (!response.ok) throw new Error('Failed to get answer');
+                
                 const result = await response.json();
+                console.log('Answer received:', result);
                 
                 // Remove loading message
-                loadingDiv.remove();
+                if (loadingDiv) loadingDiv.remove();
                 
                 if (result.success) {
                     let answer = result.answer;
                     if (result.sources && result.sources.length > 0) {
-                        answer += "\n\nSources: " + result.sources.map(s => s.product_name).join(', ');
+                        answer += `\n\n📋 Sources: ${result.sources.map(s => s.product_name).join(', ')}`;
                     }
                     addMessageToChat(answer, 'ai');
                 } else {
-                    addMessageToChat(result.answer || 'Sorry, I couldn\'t find an answer to your question.', 'ai');
+                    addMessageToChat(result.answer || 'Sorry, I couldn\'t find an answer to your question. Try uploading relevant SDS documents first.', 'ai');
                 }
                 
+                // Refresh stats
+                loadDashboardStats();
+                
             } catch (error) {
-                loadingDiv.remove();
-                addMessageToChat('Sorry, there was an error processing your question.', 'ai');
                 console.error('Error asking question:', error);
+                if (loadingDiv) loadingDiv.remove();
+                addMessageToChat('Sorry, there was an error processing your question. Please try again.', 'ai');
+                showToast('Error processing question', 'error');
+            } finally {
+                isLoading = false;
+            }
+        }
+        
+        // Ask about specific document
+        function askAboutDocument(productName) {
+            const questionInput = document.getElementById('questionInput');
+            if (questionInput) {
+                questionInput.value = `What are the safety measures for ${productName}?`;
+                askQuestion();
             }
         }
         
         // Add message to chat
         function addMessageToChat(message, sender, isLoading = false) {
             const chatContainer = document.getElementById('chatContainer');
+            if (!chatContainer) return null;
+            
             const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${sender}-message p-3 rounded-lg ${isLoading ? 'opacity-50' : ''}`;
+            messageDiv.className = `message ${sender}-message p-3 rounded-lg ${isLoading ? 'loading' : ''}`;
             
             const senderLabel = sender === 'user' ? 'You' : 'AI Assistant';
             messageDiv.innerHTML = `<p><strong>${senderLabel}:</strong> ${message.replace(/\n/g, '<br>')}</p>`;
@@ -1293,11 +1598,15 @@ HTML_TEMPLATE = '''
         // Handle file upload
         async function handleFileUpload(e) {
             e.preventDefault();
+            console.log('Handling file upload...');
             
             const formData = new FormData(e.target);
-            const uploadBtn = e.target.querySelector('button[type="submit"]');
+            const uploadBtn = document.getElementById('submitUpload');
+            
+            if (!uploadBtn) return;
             
             // Show loading state
+            const originalText = uploadBtn.innerHTML;
             uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Uploading...';
             uploadBtn.disabled = true;
             
@@ -1307,34 +1616,43 @@ HTML_TEMPLATE = '''
                     body: formData
                 });
                 
+                if (!response.ok) throw new Error('Upload failed');
+                
                 const result = await response.json();
+                console.log('Upload result:', result);
                 
                 if (result.success) {
                     showToast(`File uploaded successfully: ${result.product_name}`, 'success');
                     hideModal('uploadModal');
                     e.target.reset();
                     loadDashboardStats();
+                    loadRecentDocuments();
                 } else {
-                    showToast(result.message, 'error');
+                    showToast(result.message || 'Upload failed', 'error');
                 }
                 
             } catch (error) {
                 console.error('Error uploading file:', error);
                 showToast('Error uploading file', 'error');
             } finally {
-                uploadBtn.innerHTML = '<i class="fas fa-upload mr-2"></i>Upload';
+                uploadBtn.innerHTML = originalText;
                 uploadBtn.disabled = false;
             }
         }
         
         // Generate sticker
         async function generateSticker(type) {
-            const productName = document.getElementById('stickerProductName').value.trim();
+            const productNameInput = document.getElementById('stickerProductName');
+            if (!productNameInput) return;
+            
+            const productName = productNameInput.value.trim();
             
             if (!productName) {
                 showToast('Please enter a product name', 'warning');
                 return;
             }
+            
+            console.log(`Generating ${type} sticker for:`, productName);
             
             try {
                 const endpoint = type === 'nfpa' ? '/api/generate-nfpa' : '/api/generate-ghs';
@@ -1346,7 +1664,10 @@ HTML_TEMPLATE = '''
                     body: JSON.stringify({ product_name: productName })
                 });
                 
+                if (!response.ok) throw new Error('Failed to generate sticker');
+                
                 const result = await response.json();
+                console.log('Sticker result:', result);
                 
                 if (result.success) {
                     showToast(`${result.sticker_type} sticker generated successfully`, 'success');
@@ -1356,9 +1677,11 @@ HTML_TEMPLATE = '''
                     const link = document.createElement('a');
                     link.href = `/api/download-sticker/${result.filename}`;
                     link.download = result.filename;
+                    document.body.appendChild(link);
                     link.click();
+                    document.body.removeChild(link);
                 } else {
-                    showToast(result.message, 'error');
+                    showToast(result.message || 'Failed to generate sticker', 'error');
                 }
                 
             } catch (error) {
@@ -1370,6 +1693,8 @@ HTML_TEMPLATE = '''
         // Update popular questions
         function updatePopularQuestions(questions) {
             const container = document.getElementById('popularQuestions');
+            if (!container) return;
+            
             container.innerHTML = '';
             
             if (questions.length === 0) {
@@ -1385,8 +1710,11 @@ HTML_TEMPLATE = '''
                     <p class="text-xs text-gray-500">${q.count} times asked</p>
                 `;
                 div.addEventListener('click', () => {
-                    document.getElementById('questionInput').value = q.question;
-                    askQuestion();
+                    const questionInput = document.getElementById('questionInput');
+                    if (questionInput) {
+                        questionInput.value = q.question;
+                        askQuestion();
+                    }
                 });
                 container.appendChild(div);
             });
@@ -1394,21 +1722,32 @@ HTML_TEMPLATE = '''
         
         // Modal utilities
         function showModal(modalId) {
-            document.getElementById(modalId).classList.remove('hidden');
-            if (modalId === 'uploadModal') {
-                loadStates();
+            console.log('Showing modal:', modalId);
+            const modal = document.getElementById(modalId);
+            if (modal) {
+                modal.classList.remove('hidden');
+                if (modalId === 'uploadModal') {
+                    loadStates();
+                }
             }
         }
         
         function hideModal(modalId) {
-            document.getElementById(modalId).classList.add('hidden');
+            console.log('Hiding modal:', modalId);
+            const modal = document.getElementById(modalId);
+            if (modal) {
+                modal.classList.add('hidden');
+            }
         }
         
         // Toast notification utility
         function showToast(message, type = 'info') {
+            console.log('Showing toast:', message, type);
             const toast = document.getElementById('toast');
             const icon = document.getElementById('toastIcon');
             const messageEl = document.getElementById('toastMessage');
+            
+            if (!toast || !icon || !messageEl) return;
             
             messageEl.textContent = message;
             
@@ -1420,7 +1759,10 @@ HTML_TEMPLATE = '''
             };
             
             icon.className = config[type].icon;
-            toast.querySelector('div > div').className = `bg-white rounded-lg shadow-lg border-l-4 ${config[type].border} p-4 max-w-sm`;
+            const toastContainer = toast.querySelector('div > div');
+            if (toastContainer) {
+                toastContainer.className = `bg-white rounded-lg shadow-lg border-l-4 ${config[type].border} p-4 max-w-sm`;
+            }
             
             toast.classList.remove('hidden');
             
@@ -1430,8 +1772,19 @@ HTML_TEMPLATE = '''
         }
         
         function hideToast() {
-            document.getElementById('toast').classList.add('hidden');
+            const toast = document.getElementById('toast');
+            if (toast) {
+                toast.classList.add('hidden');
+            }
         }
+        
+        // Error handling
+        window.addEventListener('error', function(e) {
+            console.error('JavaScript error:', e.error);
+            showToast('An unexpected error occurred', 'error');
+        });
+        
+        console.log('SDS Assistant JavaScript loaded successfully');
     </script>
 </body>
 </html>
@@ -1449,7 +1802,8 @@ def health():
     return jsonify({
         "status": "healthy", 
         "timestamp": datetime.now().isoformat(),
-        "database": "connected"
+        "database": "connected",
+        "cloud_storage": "configured" if sds_assistant.cloud_storage.s3_client else "local_fallback"
     })
 
 @app.route('/api/dashboard-stats')
@@ -1472,9 +1826,15 @@ def get_locations():
     locations = sds_assistant.get_locations(state_filter, search_term)
     return jsonify(locations)
 
+@app.route('/api/recent-documents')
+def get_recent_documents():
+    """Get recently uploaded documents"""
+    documents = sds_assistant.get_recent_documents()
+    return jsonify(documents)
+
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
-    """Handle file upload"""
+    """Handle file upload with cloud storage"""
     if 'file' not in request.files:
         return jsonify({"success": False, "message": "No file provided"})
     
@@ -1502,19 +1862,6 @@ def ask_question():
         return jsonify({"success": False, "answer": "Please provide a question"})
     
     result = sds_assistant.answer_question(question, location_id, user_session)
-    return jsonify(result)
-
-@app.route('/api/search-web-sds', methods=['POST'])
-def search_web_sds():
-    """Search web for SDS documents"""
-    data = request.json
-    chemical_name = data.get('chemical_name')
-    location_id = data.get('location_id')
-    
-    if not chemical_name:
-        return jsonify({"success": False, "message": "Chemical name is required"})
-    
-    result = sds_assistant.search_web_for_sds(chemical_name, location_id)
     return jsonify(result)
 
 @app.route('/api/generate-nfpa', methods=['POST'])
@@ -1566,10 +1913,31 @@ def internal_error(error):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print("🚀 Starting SDS Assistant with AI Question Answering...")
+    print("🚀 Starting SDS Assistant with Cloud Storage...")
     print("📍 Database will be populated with US cities on first run")
+    print("☁️  Cloud storage configured for file persistence")
     print(f"🌐 Application will be available at: http://localhost:{port}")
     print("🤖 AI-powered question answering enabled")
     print("📱 Mobile PWA ready")
     print()
-    app.run(debug=False, host='0.0.0.0', port=port)
+    app.run(debug=False, host='0.0.0.0', port=port)Upload = document.getElementById('cancelUpload');
+            
+            if (closeUploadModal) {
+                closeUploadModal.addEventListener('click', () => hideModal('uploadModal'));
+            }
+            
+            if (cancelUpload) {
+                cancelUpload.addEventListener('click', () => hideModal('uploadModal'));
+            }
+            
+            // Upload form
+            const uploadForm = document.getElementById('uploadForm');
+            if (uploadForm) {
+                uploadForm.addEventListener('submit', handleFileUpload);
+                console.log('Upload form listener added');
+            }
+            
+            // Sticker generation
+            const generateStickerBtn = document.getElementById('generateStickerBtn');
+            const closeStickerModal = document.getElementById('closeStickerModal');
+            const cancel
